@@ -11,12 +11,12 @@
   "parameters": {
     "location": {
       "type": "string",
-      "defaultValue": "swedencentral",
+      "defaultValue": "eastus2",
       "allowedValues": [
-        "swedencentral"
+        "eastus2"
       ],
       "metadata": {
-        "description": "Azure location where resources should be deployed (e.g., swedencentral)"
+        "description": "Azure location where resources should be deployed (e.g., eastus2)"
       }
     }
   },
