@@ -14,14 +14,48 @@ fi
 
 echo "🚀 Starting data seeding..."
 
-# Install required Python packages
+# Create and activate virtual environment
+echo "📦 Setting up Python virtual environment..."
+VENV_DIR=".venv_seed"
+python3 -m venv $VENV_DIR
+source $VENV_DIR/bin/activate
+
+# Install required Python packages in virtual environment
 echo "📦 Installing required Python packages..."
-pip3 install azure-cosmos azure-search-documents requests --quiet
+pip install azure-cosmos azure-search-documents requests certifi --quiet
+
+# Export Zscaler certificate for SSL verification
+echo "🔐 Configuring SSL certificate..."
+security find-certificate -a -c Zscaler -p > zscaler_root_ca.pem 2>/dev/null || true
+export REQUESTS_CA_BUNDLE="$(pwd)/zscaler_root_ca.pem"
+export SSL_CERT_FILE="$(pwd)/zscaler_root_ca.pem"
 
 # Create Python script to handle the data import
 cat > seed_data.py << 'EOF'
 import json
 import os
+import ssl
+import certifi
+
+# Configure SSL certificate for Zscaler BEFORE importing Azure SDKs
+cert_path = None
+if os.path.exists('zscaler_root_ca.pem'):
+    # Create a combined certificate bundle
+    cert_path = 'combined_ca_bundle.pem'
+    with open(cert_path, 'w') as combined:
+        # Add Zscaler certificate
+        with open('zscaler_root_ca.pem', 'r') as zscaler:
+            combined.write(zscaler.read())
+        # Add certifi bundle
+        with open(certifi.where(), 'r') as system_certs:
+            combined.write(system_certs.read())
+
+    cert_path = os.path.abspath(cert_path)
+    os.environ['REQUESTS_CA_BUNDLE'] = cert_path
+    os.environ['SSL_CERT_FILE'] = cert_path
+    os.environ['CURL_CA_BUNDLE'] = cert_path
+
+# Now import Azure SDKs
 from azure.cosmos import CosmosClient, PartitionKey
 from azure.search.documents import SearchClient
 from azure.search.documents.indexes import SearchIndexClient
@@ -58,7 +92,7 @@ def load_json_data(file_path):
 def setup_cosmos_db():
     """Set up Cosmos DB database and containers for each file in the data folder"""
     print("📦 Setting up Cosmos DB...")
-    
+
     # Initialize Cosmos client
     cosmos_client = CosmosClient(os.environ['COSMOS_ENDPOINT'], os.environ['COSMOS_KEY'])
     
@@ -127,11 +161,18 @@ def seed_cosmos_data(container_clients):
 def setup_search_service():
     """Set up Azure AI Search indexes"""
     print("🔍 Setting up Azure AI Search...")
-    
+
     search_endpoint = f"https://{os.environ['SEARCH_SERVICE_NAME']}.search.windows.net"
     credential = AzureKeyCredential(os.environ['SEARCH_ADMIN_KEY'])
-    
-    index_client = SearchIndexClient(endpoint=search_endpoint, credential=credential)
+
+    # Workaround for Zscaler certificate validation issue with Azure Search
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    from azure.core.pipeline.transport import RequestsTransport
+    transport = RequestsTransport(connection_verify=False)
+
+    index_client = SearchIndexClient(endpoint=search_endpoint, credential=credential, transport=transport)
     
     # Create indexes
     indexes = ['regulations-policies']
@@ -157,16 +198,20 @@ def setup_search_service():
 def seed_search_data(search_endpoint, credential):
     """Seed data into Azure AI Search indexes"""
     print("🔍 Seeding Azure AI Search data...")
-    
+
     # Data file mappings
     index_mappings = {
         'regulations-policies': 'data/regulations.jsonl'
     }
-    
+
+    # Workaround for Zscaler certificate validation issue with Azure Search
+    from azure.core.pipeline.transport import RequestsTransport
+    transport = RequestsTransport(connection_verify=False)
+
     for index_name, file_path in index_mappings.items():
         data = load_json_data(file_path)
         if data:
-            search_client = SearchClient(endpoint=search_endpoint, index_name=index_name, credential=credential)
+            search_client = SearchClient(endpoint=search_endpoint, index_name=index_name, credential=credential, transport=transport)
             
             # Prepare documents for upload
             documents = []
@@ -214,9 +259,12 @@ EOF
 
 # Run the Python script
 echo "🐍 Running data seeding script..."
-python3 seed_data.py
+python seed_data.py
 
 # Clean up
 rm seed_data.py
+rm -f zscaler_root_ca.pem combined_ca_bundle.pem
+deactivate
+rm -rf $VENV_DIR
 
 echo "✅ Seeding complete!"
